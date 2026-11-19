@@ -404,7 +404,85 @@ Module.JYAudio = (function () {
     return 1;
   }
 
-  /* ================= 内置 MIDI 合成（不依赖 SF2） ================= */
+  /* ========== 原版音色：SF2(MIDI) 实时合成（spessasynth） ========== */
+  var sf = null, sfPlaying = false, sfName = '';
+  function ensureSynth() {
+    if (sf) return sf;
+    if (!ensureCtx()) return null;
+    sf = { loading: true, ready: false, error: '' };
+    var ac0 = AC;
+    setTimeout(function () {
+      console.log('[JYSF] 开始初始化');
+      import('./synth.js').then(function (mod) {
+        return ac0.audioWorklet.addModule('spessasynth_processor.min.js').then(function () { return mod; });
+      }).then(function (mod) {
+        var synth = new mod.WorkletSynthesizer(ac0);
+        var g = ac0.createGain(); g.gain.value = 0.6;
+        synth.connect(g); g.connect(master);
+        sf.synth = synth; sf.gain = g; sf.mod = mod; sf.ac = ac0;
+        console.log('[JYSF] WorkletSynthesizer 就绪，载入音色库…');
+        return (function () {
+          var parts = [], i = 1;
+          function next() {
+            if (i > 40) return Promise.reject(new Error('sf2 分片缺失'));
+            var nm = 'mid.sf2.' + ('00' + i).slice(-3);
+            return fetch(nm, { cache: 'force-cache' }).then(function (r) {
+              if (!r.ok) {
+                if (!parts.length) throw new Error('sf2 分片缺失');
+                var total = 0; parts.forEach(function (p) { total += p.byteLength; });
+                var all = new Uint8Array(total), off = 0;
+                parts.forEach(function (p) { all.set(p, off); off += p.byteLength; });
+                sf.sf2Buffer = all.buffer;
+                return sf.synth.soundBankManager.addSoundBank(all.buffer, 'main');
+              }
+              return r.arrayBuffer().then(function (ab) { parts.push(new Uint8Array(ab)); i++; return next(); });
+            });
+          }
+          return next();
+        })();
+      }).then(function () {
+        sf.seq = new sf.mod.Sequencer(sf.synth);
+        sf.ready = true; sf.loading = false;
+        console.log('[JYSF] 音色库载入完成 bytes=' + sf.sf2Buffer.byteLength);
+        /* 若初始化期间引擎已请求过 BGM，补播一次 */
+        if (sf.pending) { var pid = sf.pending; sf.pending = null; try { sfPlay(pid); } catch (e) {} }
+      }).catch(function (e) {
+        sf.loading = false; sf.error = String(e);
+        console.warn('[JYSF] 初始化失败：', e);
+      });
+    }, 0);
+    return sf;
+  }
+
+  function sfPlay(id) {
+    var h = handles[id];
+    if (!h) return false;
+    var s = ensureSynth();
+    if (!s) return false;
+    if (!s.ready) { s.pending = id; return false; }   /* 初始化中，记住待播曲目 */
+    var bytes;
+    try { bytes = Module.FS.readFile(resolve(h.key)); } catch (e) { return false; }
+    var u8 = new Uint8Array(bytes.length); u8.set(bytes);
+    if (!(u8[0] === 0x4D && u8[1] === 0x54 && u8[2] === 0x68 && u8[3] === 0x64)) return false;
+    try {
+      s.seq.pause();
+      s.seq.loadNewSongList([{ binary: u8.buffer, fileName: h.key }]);
+      s.seq.loopCount = h.loop ? Infinity : 1;
+      s.seq.play();
+      sfPlaying = true; sfName = h.key;
+      (window.__plays = window.__plays || []).push(h.key + '@sf2');
+      console.log('[JYSF] 播放 ' + h.key + ' loop=' + !!h.loop);
+      return true;
+    } catch (e) { console.warn('[JYSF] play fail', e); return false; }
+  }
+
+  function sfStop() {
+    if (sf && sf.seq) { try { sf.seq.pause(); } catch (e) {} }
+    sfPlaying = false;
+    return true;
+  }
+
+  /* 旧版振荡器合成：仅在 SF2 尚未就绪时兜底 */
   var musicGain = null;
   var musicCache = {};      /* key -> {notes, dur} */
 
@@ -534,6 +612,8 @@ Module.JYAudio = (function () {
   function playMusic(id) {
     var h = handles[id];
     if (!ensureCtx()) return 0;
+    if (sfPlay(id)) return 1;                /* 原版音色（SF2）优先 */
+    if (sf && !sf.ready && !sf.error) return 1;   /* SF2 初始化中：静默等待，避免与旧合成叠音 */
     ensureMusicGain();
     if (h.mid) { stopMusic(id); }            /* 换曲 */
     var data;
@@ -572,6 +652,8 @@ Module.JYAudio = (function () {
   function stopMusic(id) {
     var h = handles[id];
     if (!h) return 0;
+    sfStop();
+    if (sf) sf.pending = null;
     h.mPlaying = false;
     if (h.mTimer) { clearTimeout(h.mTimer); h.mTimer = 0; }
     h.mid = null;
@@ -620,14 +702,14 @@ Module.JYAudio = (function () {
     isActive: function (id) {
       var h = handles[id];
       if (!h) return 0;
-      if (h.kind === 'music') return h.mPlaying ? 1 : 0;
+      if (h.kind === 'music') return (sfPlaying || h.mPlaying) ? 1 : 0;
       return h.playing ? 1 : 0;
     },
     setVolume: function (id, v) {
       var h = handles[id];
       if (!h) return 0;
       h.vol = v;
-      if (h.kind === 'music') { if (musicGain) musicGain.gain.value = Math.min(1.0, v * 2.4); }
+      if (h.kind === 'music') { if (sf && sf.gain) sf.gain.gain.value = Math.min(1.0, v * 2.4); else if (musicGain) musicGain.gain.value = Math.min(1.0, v * 2.4); }
       else if (h.gain) { h.gain.gain.value = Math.min(1.0, v * 2.5); }
       return 1;
     },
