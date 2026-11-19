@@ -261,6 +261,42 @@
 var Module = {
   canvas: (function () { return document.getElementById('canvas'); })(),
   arguments: [],
+  /* ---------- 大小写别名修复 ----------
+     游戏 lua 里资源名全小写（mmap.col / earth.002 / surface.002 / war.sta ...），
+     而数据包里是 Mmap.col / Earth.002 / Surface.002 / War.sta。
+     Linux(网页 MEMFS) 区分大小写 -> 调色板打不开 -> m_color32 全 0 -> 地图人物全黑。
+     这里在引擎 main 跑起来之前，给所有含大写字母的资源补一份全小写副本。 */
+  preRun: [function jyCaseFix() {
+    try {
+      var FS = Module.FS;
+      if (!FS) return;
+      var made = 0;
+      function walk(dir) {
+        var names;
+        try { names = FS.readdir(dir); } catch (e) { return; }
+        for (var i = 0; i < names.length; i++) {
+          var n = names[i];
+          if (n === '.' || n === '..') continue;
+          var p = dir + '/' + n;
+          var st;
+          try { st = FS.stat(p); } catch (e) { continue; }
+          try { if (FS.isDir(st.mode)) { walk(p); continue; } } catch (e) {}
+
+          var low = n.toLowerCase();
+          if (low === n) continue;
+          var lp = dir + '/' + low;
+          var exists = true;
+          try { FS.stat(lp); } catch (e) { exists = false; }
+          if (exists) continue;
+          try { FS.writeFile(lp, FS.readFile(p)); made++; } catch (e) {}
+        }
+      }
+      walk('/');
+      walk('/data');
+      walk('/data/fight');
+      window.__caseFixMade = made;
+    } catch (e) {}
+  }],
   print: function (t) { (window.__log = window.__log || []).push('print: ' + t); console.log(t); },
   printErr: function (t) { (window.__log = window.__log || []).push('err: ' + t); console.error(t); },
   setStatus: function (t) {
@@ -406,6 +442,7 @@ Module.JYAudio = (function () {
 
   /* ========== 原版音色：SF2(MIDI) 实时合成（spessasynth） ========== */
   var sf = null, sfPlaying = false, sfName = '';
+  function jot(s) { try { document.documentElement.setAttribute('data-jyfs', String(s)); } catch (e) {} }
   function ensureSynth() {
     if (sf) return sf;
     if (!ensureCtx()) return null;
