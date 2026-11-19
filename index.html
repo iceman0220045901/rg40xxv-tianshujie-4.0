@@ -673,17 +673,11 @@ window.addEventListener('pointerdown', function () {
     start();
     return;
   }
-  setTimeout(start, 8000);          // 兜底：SW 8 秒没起来就直接加载
+  setTimeout(start, 12000);         // 兜底：SW 12 秒没 ready 就直接加载（start 只执行一次）
   navigator.serviceWorker.register('sw.js').then(function () {
     return navigator.serviceWorker.ready;
   }).then(function () {
-    if (navigator.serviceWorker.controller) { start(); return; }
-    if (!sessionStorage.getItem('__sw_reload')) {
-      sessionStorage.setItem('__sw_reload', '1');
-      location.reload();
-    } else {
-      start();
-    }
+    start();                        // activate 里的 clients.claim() 已接管本页，不需要 reload
   }).catch(function (e) {
     console.warn('SW register failed:', e);
     start();
