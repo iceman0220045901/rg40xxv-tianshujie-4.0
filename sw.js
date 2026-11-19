@@ -1,8 +1,12 @@
 /* 天书劫 4.0 网页版 —— 分片拼装 Service Worker
- * game.data 共 93.8MB，超过 GitHub 网页单文件 25MB 上传上限，
- * 因此切成 4 个 < 25MB 的分片提交到仓库，由本 SW 在加载时拼回整包。
+ * game.data 共 93.8MB，超过 GitHub 网页单文件 25MB 上限，
+ * 切成 24 个 4MB 分片提交，由本 SW 在 fetch 时按序拼回整包。
  */
-const PARTS = ['game.data.001', 'game.data.002', 'game.data.003', 'game.data.004'];
+const PARTS = (function () {
+  const a = [];
+  for (let i = 1; i <= 24; i++) a.push('game.data.c' + (i < 10 ? '0' + i : '' + i));
+  return a;
+})();
 
 self.addEventListener('install', () => self.skipWaiting());
 
